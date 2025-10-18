@@ -5,23 +5,10 @@ import * as vscode from 'vscode';
 const DEFAULT_PORT = 3141;
 const DEFAULT_HOST = '127.0.0.1';
 
-type TextContentPart = { type: 'text'; text: string };
-
-type ResponseApiContent =
-	| string
-	| TextContentPart
-	| Array<TextContentPart | { type: string; [key: string]: unknown }>;
-
-interface ResponseApiMessage {
-	role: 'user' | 'assistant' | 'system';
-	content?: ResponseApiContent;
-}
-
 interface ResponsesApiRequestBody {
 	model?: string;
-	input?: ResponseApiMessage[] | string;
-	messages?: ResponseApiMessage[];
 	stream?: boolean;
+	[key: string]: unknown;
 }
 
 type ResponseOutputTextPart = {
@@ -81,12 +68,6 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				const normalizedMessages = this.normalizeMessages(body);
-				if (normalizedMessages.length === 0) {
-					this.sendError(res, 400, 'Request must include at least one message');
-					return;
-				}
-
 				console.log('[LM Proxy] Incoming request body:', req.body);
 
 				const model = await this.resolveModel(body.model);
@@ -95,7 +76,7 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				const vsMessages = normalizedMessages.map((message) => this.toVsCodeMessage(message));
+				const vsMessages = [this.toVsCodeMessage(req.body)];
 
 				if (this.isStreamRequest(req, body)) {
 					await this.handleStreamResponse(req, res, model, vsMessages);
@@ -454,61 +435,22 @@ class LmProxyServer implements vscode.Disposable {
 		}
 	}
 
-	private normalizeMessages(body: ResponsesApiRequestBody): ResponseApiMessage[] {
-		const fromArray = (messages: unknown[]): ResponseApiMessage[] =>
-			messages
-				.filter((item): item is { role?: unknown; content?: unknown } => typeof item === 'object' && item !== null)
-				.map((item) => {
-					const candidateRole = typeof item.role === 'string' ? item.role : 'user';
-					return {
-						role: this.normalizeRole(candidateRole),
-						content: item.content as ResponseApiContent | undefined,
-					};
-				});
-
-		if (Array.isArray(body.messages)) {
-			return fromArray(body.messages);
+	private toVsCodeMessage(raw: unknown): vscode.LanguageModelChatMessage {
+		let text = '';
+		if (raw !== undefined && raw !== null) {
+			if (typeof raw === 'string') {
+				text = raw;
+			} else {
+				try {
+					text = JSON.stringify(raw);
+				} catch (error) {
+					console.error('[LM Proxy] Failed to stringify request payload', error);
+					text = String(raw);
+				}
+			}
 		}
 
-		if (Array.isArray(body.input)) {
-			return fromArray(body.input);
-		}
-
-		if (typeof body.input === 'string') {
-			return [{ role: 'user', content: { type: 'text', text: body.input } }];
-		}
-
-		return [];
-	}
-
-	private normalizeRole(candidate: string): ResponseApiMessage['role'] {
-		if (candidate === 'assistant') {
-			return 'assistant';
-		}
-		if (candidate === 'system') {
-			return 'system';
-		}
-		return 'user';
-	}
-
-	private toVsCodeMessage(message: ResponseApiMessage): vscode.LanguageModelChatMessage {
-		const text = this.stringifyRawContent(message.content);
 		return vscode.LanguageModelChatMessage.User(text);
-	}
-
-	private stringifyRawContent(content: ResponseApiContent | undefined): string {
-		if (content === undefined || content === null) {
-			return '';
-		}
-		if (typeof content === 'string') {
-			return content;
-		}
-		try {
-			return JSON.stringify(content);
-		} catch (error) {
-			console.error('[LM Proxy] Failed to stringify content', error);
-			return String(content);
-		}
 	}
 
 	private async resolveModel(_preferredModelId: string | undefined) {
