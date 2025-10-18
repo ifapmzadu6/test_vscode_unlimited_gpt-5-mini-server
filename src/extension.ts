@@ -95,9 +95,7 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				const vsMessages = normalizedMessages.map((message) =>
-					this.toVsCodeMessage(message.role, message.content),
-				);
+				const vsMessages = normalizedMessages.map((message) => this.toVsCodeMessage(message));
 
 				if (this.isStreamRequest(req, body)) {
 					await this.handleStreamResponse(req, res, model, vsMessages);
@@ -493,53 +491,24 @@ class LmProxyServer implements vscode.Disposable {
 		return 'user';
 	}
 
-	private toVsCodeMessage(
-		role: ResponseApiMessage['role'],
-		content: ResponseApiContent | undefined,
-	): vscode.LanguageModelChatMessage {
-		const text = this.extractTextContent(content);
-
-		if (role === 'assistant') {
-			return vscode.LanguageModelChatMessage.Assistant(text);
-		}
-
-		if (role === 'user') {
-			return vscode.LanguageModelChatMessage.User(text);
-		}
-
-		// VS Code LM API does not currently expose a system role. Treat it as user context.
-		return vscode.LanguageModelChatMessage.User(`[system prompt]\n${text}`);
+	private toVsCodeMessage(message: ResponseApiMessage): vscode.LanguageModelChatMessage {
+		const text = this.stringifyRawContent(message.content);
+		return vscode.LanguageModelChatMessage.User(text);
 	}
 
-	private extractTextContent(content: ResponseApiContent | undefined): string {
-		if (!content) {
+	private stringifyRawContent(content: ResponseApiContent | undefined): string {
+		if (content === undefined || content === null) {
 			return '';
 		}
-
 		if (typeof content === 'string') {
 			return content;
 		}
-
-		if (Array.isArray(content)) {
-			return content
-				.map((part) => {
-					if (typeof part !== 'object' || !part) {
-						return '';
-					}
-					if ('text' in part && typeof part.text === 'string') {
-						return part.text;
-					}
-					return '';
-				})
-				.filter((value) => value.length > 0)
-				.join('\n');
+		try {
+			return JSON.stringify(content);
+		} catch (error) {
+			console.error('[LM Proxy] Failed to stringify content', error);
+			return String(content);
 		}
-
-		if (typeof content === 'object' && 'text' in content && typeof content.text === 'string') {
-			return content.text;
-		}
-
-		return '';
 	}
 
 	private async resolveModel(preferredModelId: string | undefined) {
