@@ -121,6 +121,7 @@ class LmProxyServer implements vscode.Disposable {
 					}
 
 					const aggregatedText = textFragments.join('');
+					console.log('[LM Proxy] Response text:', aggregatedText);
 					const outputContent =
 						aggregatedText.length > 0
 							? [
@@ -371,6 +372,7 @@ class LmProxyServer implements vscode.Disposable {
 				aggregatedText += chunk;
 				textPart.text = aggregatedText;
 				baseResponse.output_text = aggregatedText;
+				console.log('[LM Proxy] Stream delta:', chunk);
 
 				this.writeSseEvent(res, 'response.output_text.delta', {
 					type: 'response.output_text.delta',
@@ -386,6 +388,7 @@ class LmProxyServer implements vscode.Disposable {
 			messageItem.status = 'completed';
 			baseResponse.status = 'completed';
 			baseResponse.output_text = textPart.text;
+			console.log('[LM Proxy] Stream final text:', textPart.text);
 
 			this.writeSseEvent(res, 'response.output_text.done', {
 				type: 'response.output_text.done',
