@@ -87,17 +87,7 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				const logMessages = normalizedMessages.map((message) => ({
-					role: message.role,
-					content: message.content,
-				}));
-
-				console.log('[LM Proxy] Incoming request', {
-					model: body.model ?? 'auto',
-					stream: body.stream === true,
-					message_count: normalizedMessages.length,
-					messages: logMessages,
-				});
+				console.log('[LM Proxy] Incoming request body:', JSON.stringify(req.body, null, 2));
 
 				const model = await this.resolveModel(body.model);
 				if (!model) {
