@@ -511,17 +511,16 @@ class LmProxyServer implements vscode.Disposable {
 		}
 	}
 
-	private async resolveModel(preferredModelId: string | undefined) {
+	private async resolveModel(_preferredModelId: string | undefined) {
 		try {
-			if (preferredModelId) {
-				const [model] = await vscode.lm.selectChatModels({ id: preferredModelId });
-				if (model) {
-					return model;
-				}
+			const models = await vscode.lm.selectChatModels({ id: 'gpt-5-mini' });
+			if (models.length > 0) {
+				return models[0];
 			}
 
-			const models = await vscode.lm.selectChatModels();
-			return models[0];
+			console.warn('[LM Proxy] Preferred model "gpt-5-mini" not found; using first available model.');
+			const fallbackModels = await vscode.lm.selectChatModels();
+			return fallbackModels[0];
 		} catch (error) {
 			console.error('[LM Proxy] Unable to select chat models', error);
 			return undefined;
