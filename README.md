@@ -79,9 +79,28 @@ OpenAI Responses API 互換のボディを受け取り、VS Code LM API に転�
 }
 ```
 
+#### ストリーミング
+
+リクエストボディで `stream: true` を指定すると、`text/event-stream` を用いた SSE 形式でレスポンスをストリーム配信します。OpenAI Responses API と同様に `response.created` や `response.output_text.delta` などのイベントが順次送られ、最後に `[DONE]` が送信されます。
+
+```bash
+curl -N \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+        "model": "gpt-5-mini",
+        "stream": true,
+        "messages": [
+          { "role": "user", "content": [{ "type": "text", "text": "ストリームで応答して" }] }
+        ]
+      }' \
+  http://127.0.0.1:3141/v1/responses
+```
+
+現在はテキストデルタのみをサポートし、ツール呼び出しやその他のイベントは未対応です。
+
 ## 注意事項
 
 - VS Code の LM API 制約により、ツール呼び出しや画像などの高度なコンテンツは未対応です。
 - モデルが提供するトークン数などの詳細メトリクスは取得できないため `usage` フィールドはゼロを返します。
 - モデル呼び出しはユーザー承認が必要です。初回リクエストで拒否された場合、クライアント側には 500 エラーが返ります。VS Code でアクセス許可を確認してください。
-
