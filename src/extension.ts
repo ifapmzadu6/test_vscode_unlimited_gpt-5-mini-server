@@ -89,7 +89,7 @@ class LmProxyServer implements vscode.Disposable {
 
 				const logMessages = normalizedMessages.map((message) => ({
 					role: message.role,
-					content: this.extractTextContent(message.content),
+					content: message.content,
 				}));
 
 				console.log('[LM Proxy] Incoming request', {
