@@ -13,6 +13,7 @@ interface ResponsesApiRequestBody {
 
 class LmProxyServer implements vscode.Disposable {
 	private server: http.Server | undefined;
+	private requestCounter = 0;
 
 	public async start(): Promise<void> {
 		const configuration = vscode.workspace.getConfiguration('lmProxyServer');
@@ -34,6 +35,8 @@ class LmProxyServer implements vscode.Disposable {
 		});
 
 		app.post('/v1/responses', async (req, res) => {
+			let requestId: string | undefined;
+			let startedAt = Date.now();
 			try {
 				const body = req.body as ResponsesApiRequestBody | undefined;
 				if (!body || typeof body !== 'object') {
@@ -41,18 +44,29 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				console.log('[LM Proxy] Incoming request body:', req.body);
+				requestId = this.nextRequestId();
+				startedAt = Date.now();
+				const rawBodyString = this.safeStringify(req.body);
+				console.log(`[LM Proxy][${requestId}] Incoming request body (${rawBodyString.length} chars)`);
 
 				const model = await this.resolveModel(body.model);
 				if (!model) {
+					console.warn(
+						`[LM Proxy][${requestId}] No chat model available for request (requested=${body.model ?? 'default'})`,
+					);
 					this.sendError(res, 404, `No chat model found for id "${body.model ?? 'default'}"`);
 					return;
 				}
+
+				console.log(
+					`[LM Proxy][${requestId}] Using model ${model.id} (vendor=${model.vendor}, family=${model.family}, maxTokens=${model.maxInputTokens})`,
+				);
 
 				const vsMessages = [this.toVsCodeMessage(req.body)];
 
 				const tokenSource = new vscode.CancellationTokenSource();
 				try {
+					console.log(`[LM Proxy][${requestId}] Dispatching request to VS Code LM API`);
 					const response = await model.sendRequest(
 						vsMessages,
 						{
@@ -66,6 +80,7 @@ class LmProxyServer implements vscode.Disposable {
 					const responseStream = (response as { stream?: AsyncIterable<unknown> }).stream;
 
 					if (responseStream) {
+						console.log(`[LM Proxy][${requestId}] Streaming response detected (async iterable)`);
 						for await (const part of responseStream) {
 							if (typeof part === 'string') {
 								textFragments.push(part);
@@ -85,7 +100,7 @@ class LmProxyServer implements vscode.Disposable {
 
 								if ('callId' in part) {
 									const toolCall = part as { callId: unknown; content?: unknown };
-									console.log('[LM Proxy] Tool call part received', {
+									console.log(`[LM Proxy][${requestId}] Tool call part received`, {
 										callId: toolCall.callId,
 										content: toolCall.content,
 									});
@@ -93,16 +108,27 @@ class LmProxyServer implements vscode.Disposable {
 								}
 							}
 
-							console.log('[LM Proxy] Non-text response part received', part);
+							console.log(`[LM Proxy][${requestId}] Non-text response part received`, part);
 						}
 					} else {
+						console.log(`[LM Proxy][${requestId}] Streaming interface unavailable; falling back to text iterator`);
 						for await (const chunk of response.text) {
 							textFragments.push(chunk);
 						}
 					}
 
 					const aggregatedText = textFragments.join('');
-					console.log('[LM Proxy] Response text:', aggregatedText);
+					console.log(
+						`[LM Proxy][${requestId}] Response text length=${aggregatedText.length} chars`,
+					);
+					console.log(
+						`[LM Proxy][${requestId}] Collected ${textFragments.length} text fragment(s) from model`,
+					);
+					if (aggregatedText.length === 0) {
+						console.warn(
+							`[LM Proxy][${requestId}] No text returned from model; check tool/call requirements or model output.`,
+						);
+					}
 					const outputContent =
 						aggregatedText.length > 0
 							? [
@@ -138,11 +164,26 @@ class LmProxyServer implements vscode.Disposable {
 							total_tokens: 0,
 						},
 					});
+					console.log(
+						`[LM Proxy][${requestId}] Request completed in ${Date.now() - startedAt}ms`,
+					);
 				} finally {
 					tokenSource.dispose();
 				}
 			} catch (error) {
+				const errorMessage =
+					error instanceof Error
+						? `${error.name}: ${error.message}`
+						: typeof error === 'string'
+							? error
+							: this.safeStringify(error);
 				console.error('[LM Proxy] request failed', error);
+				if (requestId) {
+					console.error(
+						`[LM Proxy][${requestId}] Request failed after ${Date.now() - startedAt}ms`,
+					);
+				}
+				console.error(`[LM Proxy] request failure details: ${errorMessage}`);
 				this.sendError(res, 500, 'Failed to fulfill request via VS Code LM API');
 			}
 		});
@@ -209,6 +250,21 @@ class LmProxyServer implements vscode.Disposable {
 		} catch (error) {
 			console.error('[LM Proxy] Unable to select chat models', error);
 			return undefined;
+		}
+	}
+
+	private nextRequestId(): string {
+		this.requestCounter = (this.requestCounter + 1) % Number.MAX_SAFE_INTEGER;
+		const id = this.requestCounter.toString(16).padStart(6, '0');
+		return `req_${id}`;
+	}
+
+	private safeStringify(value: unknown): string {
+		try {
+			return JSON.stringify(value);
+		} catch (error) {
+			console.error('[LM Proxy] Failed to stringify value', error);
+			return '[unserializable]';
 		}
 	}
 }
