@@ -64,11 +64,6 @@ class LmProxyServer implements vscode.Disposable {
 
 				const vsMessages = [this.toVsCodeMessage(req.body)];
 				console.log(`[LM Proxy][${requestId}] Serialized payload token estimation requested`);
-				const tokenEstimate = await this.countTokensWithTimeout(model, vsMessages[0], requestId, 5000);
-				if (tokenEstimate !== undefined) {
-					console.log(`[LM Proxy][${requestId}] VS Code LM token estimate=${tokenEstimate}`);
-				}
-
 				const tokenSource = new vscode.CancellationTokenSource();
 				try {
 					console.log(`[LM Proxy][${requestId}] Dispatching request to VS Code LM API`);
@@ -302,48 +297,7 @@ class LmProxyServer implements vscode.Disposable {
 		}
 	}
 
-	private async countTokensWithTimeout(
-		model: vscode.LanguageModelChat,
-		message: vscode.LanguageModelChatMessage,
-		requestId: string,
-		timeoutMs: number,
-	): Promise<number | undefined> {
-		const start = Date.now();
-		let timeoutHandle: NodeJS.Timeout | undefined;
-		const timeout = new Promise<undefined>((resolve) => {
-			timeoutHandle = setTimeout(() => {
-				console.warn(
-					`[LM Proxy][${requestId}] Token estimation timed out after ${timeoutMs}ms; continuing without value.`,
-				);
-				resolve(undefined);
-			}, timeoutMs);
-		});
-
-		try {
-			const estimation = (await Promise.race([model.countTokens(message), timeout])) as
-				| number
-				| undefined;
-			if (timeoutHandle) {
-				clearTimeout(timeoutHandle);
-			}
-			if (estimation !== undefined) {
-				console.log(
-					`[LM Proxy][${requestId}] Token estimation completed in ${Date.now() - start}ms`,
-				);
-			}
-			return estimation;
-		} catch (error) {
-			if (timeoutHandle) {
-				clearTimeout(timeoutHandle);
-			}
-			console.warn(
-				`[LM Proxy][${requestId}] Failed to estimate tokens: ${
-					error instanceof Error ? error.message : error
-				}`,
-			);
-			return undefined;
-		}
-	}
+	// No token-counting helper needed; the proxy forwards payloads directly.
 }
 
 let serverInstance: LmProxyServer | undefined;
