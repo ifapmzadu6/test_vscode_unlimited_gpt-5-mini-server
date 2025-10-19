@@ -63,6 +63,17 @@ class LmProxyServer implements vscode.Disposable {
 				);
 
 				const vsMessages = [this.toVsCodeMessage(req.body)];
+				console.log(`[LM Proxy][${requestId}] Serialized payload token estimation requested`);
+				try {
+					const tokenEstimate = await model.countTokens(vsMessages[0]);
+					console.log(`[LM Proxy][${requestId}] VS Code LM token estimate=${tokenEstimate}`);
+				} catch (tokenError) {
+					console.warn(
+						`[LM Proxy][${requestId}] Failed to estimate tokens: ${
+							tokenError instanceof Error ? tokenError.message : tokenError
+						}`,
+					);
+				}
 
 				const tokenSource = new vscode.CancellationTokenSource();
 				try {
@@ -81,19 +92,34 @@ class LmProxyServer implements vscode.Disposable {
 
 					if (responseStream) {
 						console.log(`[LM Proxy][${requestId}] Streaming response detected (async iterable)`);
+
+						let chunkIndex = 0;
+						const streamStart = Date.now();
+						const logChunk = (label: string, detail: unknown) => {
+							console.log(
+								`[LM Proxy][${requestId}] Stream chunk #${chunkIndex} (${Date.now() - streamStart}ms since start) -> ${label}`,
+								detail,
+							);
+						};
+
 						for await (const part of responseStream) {
+							chunkIndex += 1;
+
 							if (typeof part === 'string') {
+								logChunk('string', part.slice(0, 80));
 								textFragments.push(part);
 								continue;
 							}
 
 							if (part && typeof part === 'object') {
 								if ('value' in part && typeof (part as { value: unknown }).value === 'string') {
+									logChunk('LanguageModelTextPart', (part as { value: string }).value.slice(0, 80));
 									textFragments.push((part as { value: string }).value);
 									continue;
 								}
 
 								if ('text' in part && typeof (part as { text: unknown }).text === 'string') {
+									logChunk('TextPart', (part as { text: string }).text.slice(0, 80));
 									textFragments.push((part as { text: string }).text);
 									continue;
 								}
@@ -108,13 +134,27 @@ class LmProxyServer implements vscode.Disposable {
 								}
 							}
 
-							console.log(`[LM Proxy][${requestId}] Non-text response part received`, part);
+							logChunk('Non-text', part);
 						}
+
+						console.log(
+							`[LM Proxy][${requestId}] Stream completed after ${Date.now() - streamStart}ms with ${chunkIndex} chunk(s)`,
+						);
 					} else {
 						console.log(`[LM Proxy][${requestId}] Streaming interface unavailable; falling back to text iterator`);
+						let chunkIndex = 0;
+						const streamStart = Date.now();
 						for await (const chunk of response.text) {
+							chunkIndex += 1;
+							console.log(
+								`[LM Proxy][${requestId}] Text iterator chunk #${chunkIndex} (${Date.now() - streamStart}ms):`,
+								chunk.slice(0, 80),
+							);
 							textFragments.push(chunk);
 						}
+						console.log(
+							`[LM Proxy][${requestId}] Text iterator completed after ${Date.now() - streamStart}ms with ${chunkIndex} chunk(s)`,
+						);
 					}
 
 					const aggregatedText = textFragments.join('');
