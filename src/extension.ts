@@ -63,8 +63,42 @@ class LmProxyServer implements vscode.Disposable {
 					);
 
 					const textFragments: string[] = [];
-					for await (const chunk of response.text) {
-						textFragments.push(chunk);
+					const responseStream = (response as { stream?: AsyncIterable<unknown> }).stream;
+
+					if (responseStream) {
+						for await (const part of responseStream) {
+							if (typeof part === 'string') {
+								textFragments.push(part);
+								continue;
+							}
+
+							if (part && typeof part === 'object') {
+								if ('value' in part && typeof (part as { value: unknown }).value === 'string') {
+									textFragments.push((part as { value: string }).value);
+									continue;
+								}
+
+								if ('text' in part && typeof (part as { text: unknown }).text === 'string') {
+									textFragments.push((part as { text: string }).text);
+									continue;
+								}
+
+								if ('callId' in part) {
+									const toolCall = part as { callId: unknown; content?: unknown };
+									console.log('[LM Proxy] Tool call part received', {
+										callId: toolCall.callId,
+										content: toolCall.content,
+									});
+									continue;
+								}
+							}
+
+							console.log('[LM Proxy] Non-text response part received', part);
+						}
+					} else {
+						for await (const chunk of response.text) {
+							textFragments.push(chunk);
+						}
 					}
 
 					const aggregatedText = textFragments.join('');
