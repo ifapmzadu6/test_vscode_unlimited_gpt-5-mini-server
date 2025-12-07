@@ -49,11 +49,46 @@ interface Session {
 	history: AdkContent[];
 }
 
+// OpenAI Assistants API types
+interface OaiMessage {
+	id: string;
+	object: 'thread.message';
+	created_at: number;
+	thread_id: string;
+	role: 'user' | 'assistant';
+	content: Array<{ type: 'text'; text: { value: string } }>;
+	metadata?: Record<string, string>;
+}
+
+interface OaiThread {
+	id: string;
+	object: 'thread';
+	created_at: number;
+	metadata?: Record<string, string>;
+	messages: OaiMessage[];
+}
+
+interface OaiRun {
+	id: string;
+	object: 'thread.run';
+	created_at: number;
+	thread_id: string;
+	assistant_id: string;
+	status: 'queued' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
+	started_at?: number;
+	completed_at?: number;
+	model: string;
+	instructions?: string;
+}
+
 class LmProxyServer implements vscode.Disposable {
 	private server: http.Server | undefined;
 	private requestCounter = 0;
 	private eventCounter = 0;
 	private sessions: Map<string, Session> = new Map();
+	private threads: Map<string, OaiThread> = new Map();
+	private messageCounter = 0;
+	private runCounter = 0;
 
 	public async start(): Promise<void> {
 		const configuration = vscode.workspace.getConfiguration('lmProxyServer');
@@ -494,6 +529,321 @@ class LmProxyServer implements vscode.Disposable {
 		});
 
 		// ==================== End ADK API Endpoints ====================
+
+		// ==================== OpenAI Assistants API Endpoints ====================
+
+		// Virtual Assistants (fixed response)
+		app.get('/v1/assistants', (_req, res) => {
+			res.json({
+				object: 'list',
+				data: [{
+					id: 'asst_default',
+					object: 'assistant',
+					created_at: Math.floor(Date.now() / 1000),
+					name: 'VS Code LM Proxy Assistant',
+					model: 'gpt-5-mini',
+					instructions: 'You are a helpful assistant.',
+				}],
+			});
+		});
+
+		app.get('/v1/assistants/:assistant_id', (req, res) => {
+			res.json({
+				id: req.params.assistant_id || 'asst_default',
+				object: 'assistant',
+				created_at: Math.floor(Date.now() / 1000),
+				name: 'VS Code LM Proxy Assistant',
+				model: 'gpt-5-mini',
+				instructions: 'You are a helpful assistant.',
+			});
+		});
+
+		// Threads CRUD
+		app.post('/v1/threads', (req, res) => {
+			const threadId = `thread_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+			const thread: OaiThread = {
+				id: threadId,
+				object: 'thread',
+				created_at: Math.floor(Date.now() / 1000),
+				metadata: req.body?.metadata || {},
+				messages: [],
+			};
+			this.threads.set(threadId, thread);
+			console.log(`[Assistants] Created thread: ${threadId}`);
+			res.status(201).json({
+				id: thread.id,
+				object: thread.object,
+				created_at: thread.created_at,
+				metadata: thread.metadata,
+			});
+		});
+
+		app.get('/v1/threads/:thread_id', (req, res) => {
+			const thread = this.threads.get(req.params.thread_id);
+			if (!thread) {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+				return;
+			}
+			res.json({
+				id: thread.id,
+				object: thread.object,
+				created_at: thread.created_at,
+				metadata: thread.metadata,
+			});
+		});
+
+		app.delete('/v1/threads/:thread_id', (req, res) => {
+			if (this.threads.delete(req.params.thread_id)) {
+				res.json({ id: req.params.thread_id, object: 'thread.deleted', deleted: true });
+			} else {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+			}
+		});
+
+		// Messages
+		app.post('/v1/threads/:thread_id/messages', (req, res) => {
+			const thread = this.threads.get(req.params.thread_id);
+			if (!thread) {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+				return;
+			}
+			this.messageCounter++;
+			const messageId = `msg_${this.messageCounter.toString(16).padStart(8, '0')}`;
+			const content = typeof req.body?.content === 'string' ? req.body.content : '';
+			const message: OaiMessage = {
+				id: messageId,
+				object: 'thread.message',
+				created_at: Math.floor(Date.now() / 1000),
+				thread_id: thread.id,
+				role: req.body?.role || 'user',
+				content: [{ type: 'text', text: { value: content } }],
+				metadata: req.body?.metadata || {},
+			};
+			thread.messages.push(message);
+			res.status(201).json(message);
+		});
+
+		app.get('/v1/threads/:thread_id/messages', (req, res) => {
+			const thread = this.threads.get(req.params.thread_id);
+			if (!thread) {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+				return;
+			}
+			res.json({ object: 'list', data: thread.messages });
+		});
+
+		app.get('/v1/threads/:thread_id/messages/:message_id', (req, res) => {
+			const thread = this.threads.get(req.params.thread_id);
+			if (!thread) {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+				return;
+			}
+			const message = thread.messages.find(m => m.id === req.params.message_id);
+			if (!message) {
+				res.status(404).json({ error: { message: 'Message not found', type: 'invalid_request_error' } });
+				return;
+			}
+			res.json(message);
+		});
+
+		// Runs - execute synchronously
+		app.post('/v1/threads/:thread_id/runs', async (req, res) => {
+			const requestId = this.nextRequestId();
+			const startedAt = Date.now();
+			const thread = this.threads.get(req.params.thread_id);
+			if (!thread) {
+				res.status(404).json({ error: { message: 'Thread not found', type: 'invalid_request_error' } });
+				return;
+			}
+
+			this.runCounter++;
+			const runId = `run_${this.runCounter.toString(16).padStart(8, '0')}`;
+			const assistantId = req.body?.assistant_id || 'asst_default';
+
+			console.log(`[Assistants][${requestId}] Run ${runId} started for thread ${thread.id}`);
+
+			try {
+				const model = await this.resolveModel(undefined);
+				if (!model) {
+					res.status(503).json({ error: { message: 'No language model available', type: 'server_error' } });
+					return;
+				}
+
+				// Build messages from thread
+				const vsMessages: vscode.LanguageModelChatMessage[] = [];
+				for (const msg of thread.messages) {
+					const text = msg.content[0]?.text?.value || '';
+					if (msg.role === 'user') {
+						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
+					} else {
+						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
+					}
+				}
+
+				if (vsMessages.length === 0) {
+					res.status(400).json({ error: { message: 'Thread has no messages', type: 'invalid_request_error' } });
+					return;
+				}
+
+				const tokenSource = new vscode.CancellationTokenSource();
+				try {
+					const response = await model.sendRequest(
+						vsMessages,
+						{ justification: 'OpenAI Assistants API request via VS Code LM proxy' },
+						tokenSource.token,
+					);
+
+					const textFragments: string[] = [];
+					for await (const chunk of response.text) {
+						textFragments.push(chunk);
+					}
+					const responseText = textFragments.join('');
+
+					// Add assistant response to thread
+					this.messageCounter++;
+					const assistantMsg: OaiMessage = {
+						id: `msg_${this.messageCounter.toString(16).padStart(8, '0')}`,
+						object: 'thread.message',
+						created_at: Math.floor(Date.now() / 1000),
+						thread_id: thread.id,
+						role: 'assistant',
+						content: [{ type: 'text', text: { value: responseText } }],
+					};
+					thread.messages.push(assistantMsg);
+
+					const run: OaiRun = {
+						id: runId,
+						object: 'thread.run',
+						created_at: Math.floor(startedAt / 1000),
+						thread_id: thread.id,
+						assistant_id: assistantId,
+						status: 'completed',
+						started_at: Math.floor(startedAt / 1000),
+						completed_at: Math.floor(Date.now() / 1000),
+						model: model.id,
+					};
+
+					console.log(`[Assistants][${requestId}] Run ${runId} completed in ${Date.now() - startedAt}ms`);
+					res.json(run);
+				} finally {
+					tokenSource.dispose();
+				}
+			} catch (error) {
+				console.error(`[Assistants][${requestId}] Run ${runId} failed:`, error);
+				res.status(500).json({ error: { message: 'Internal server error', type: 'server_error' } });
+			}
+		});
+
+		// Create thread and run together
+		app.post('/v1/threads/runs', async (req, res) => {
+			// Create thread first
+			const threadId = `thread_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+			const thread: OaiThread = {
+				id: threadId,
+				object: 'thread',
+				created_at: Math.floor(Date.now() / 1000),
+				metadata: {},
+				messages: [],
+			};
+
+			// Add messages from request
+			if (req.body?.thread?.messages) {
+				for (const msg of req.body.thread.messages) {
+					this.messageCounter++;
+					const message: OaiMessage = {
+						id: `msg_${this.messageCounter.toString(16).padStart(8, '0')}`,
+						object: 'thread.message',
+						created_at: Math.floor(Date.now() / 1000),
+						thread_id: threadId,
+						role: msg.role || 'user',
+						content: [{ type: 'text', text: { value: msg.content || '' } }],
+					};
+					thread.messages.push(message);
+				}
+			}
+
+			this.threads.set(threadId, thread);
+
+			// Now forward to the run handler by modifying request params
+			req.params = { thread_id: threadId };
+			// Recursively call the run endpoint logic (inline for simplicity)
+			const requestId = this.nextRequestId();
+			const startedAt = Date.now();
+			this.runCounter++;
+			const runId = `run_${this.runCounter.toString(16).padStart(8, '0')}`;
+			const assistantId = req.body?.assistant_id || 'asst_default';
+
+			try {
+				const model = await this.resolveModel(undefined);
+				if (!model) {
+					res.status(503).json({ error: { message: 'No language model available', type: 'server_error' } });
+					return;
+				}
+
+				const vsMessages: vscode.LanguageModelChatMessage[] = [];
+				for (const msg of thread.messages) {
+					const text = msg.content[0]?.text?.value || '';
+					if (msg.role === 'user') {
+						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
+					} else {
+						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
+					}
+				}
+
+				if (vsMessages.length === 0) {
+					res.status(400).json({ error: { message: 'No messages provided', type: 'invalid_request_error' } });
+					return;
+				}
+
+				const tokenSource = new vscode.CancellationTokenSource();
+				try {
+					const response = await model.sendRequest(
+						vsMessages,
+						{ justification: 'OpenAI Assistants API request via VS Code LM proxy' },
+						tokenSource.token,
+					);
+
+					const textFragments: string[] = [];
+					for await (const chunk of response.text) {
+						textFragments.push(chunk);
+					}
+					const responseText = textFragments.join('');
+
+					this.messageCounter++;
+					const assistantMsg: OaiMessage = {
+						id: `msg_${this.messageCounter.toString(16).padStart(8, '0')}`,
+						object: 'thread.message',
+						created_at: Math.floor(Date.now() / 1000),
+						thread_id: thread.id,
+						role: 'assistant',
+						content: [{ type: 'text', text: { value: responseText } }],
+					};
+					thread.messages.push(assistantMsg);
+
+					const run: OaiRun = {
+						id: runId,
+						object: 'thread.run',
+						created_at: Math.floor(startedAt / 1000),
+						thread_id: thread.id,
+						assistant_id: assistantId,
+						status: 'completed',
+						started_at: Math.floor(startedAt / 1000),
+						completed_at: Math.floor(Date.now() / 1000),
+						model: model.id,
+					};
+
+					console.log(`[Assistants][${requestId}] Thread+Run ${runId} completed`);
+					res.json(run);
+				} finally {
+					tokenSource.dispose();
+				}
+			} catch (error) {
+				console.error(`[Assistants][${requestId}] Thread+Run failed:`, error);
+				res.status(500).json({ error: { message: 'Internal server error', type: 'server_error' } });
+			}
+		});
+
+		// ==================== End OpenAI Assistants API Endpoints ====================
 
 		await new Promise<void>((resolve, reject) => {
 			this.server = app
