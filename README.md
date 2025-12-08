@@ -186,6 +186,8 @@ ADK クライアントで `base_url` をこのサーバーに向けて設定し�
 
 **VS Code Insiders版で画像入力をサポートします**（Proposed API: `languageModelDataPart`）
 
+📚 **詳しい使用例は [examples/](./examples/) ディレクトリを参照してください**
+
 ### Google ADK API
 
 画像を送信するには、`parts`に`data`フィールドを含めます：
