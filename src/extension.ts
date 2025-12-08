@@ -14,6 +14,10 @@ interface ResponsesApiRequestBody {
 // ADK API types
 interface AdkContentPart {
 	text?: string;
+	data?: {
+		data: string; // base64 encoded image data
+		mime_type: string; // e.g., "image/png", "image/jpeg"
+	};
 	// Future: function_call, function_response, etc.
 }
 
@@ -50,13 +54,24 @@ interface Session {
 }
 
 // OpenAI Assistants API types
+type OaiContentPart =
+	| { type: 'text'; text: { value: string } }
+	| {
+			type: 'image_url';
+			image_url: { url: string }; // data:image/png;base64,... or http(s) URL
+	  }
+	| {
+			type: 'image_file';
+			image_file: { file_id: string };
+	  };
+
 interface OaiMessage {
 	id: string;
 	object: 'thread.message';
 	created_at: number;
 	thread_id: string;
 	role: 'user' | 'assistant';
-	content: Array<{ type: 'text'; text: { value: string } }>;
+	content: OaiContentPart[];
 	metadata?: Record<string, string>;
 }
 
@@ -313,12 +328,6 @@ class LmProxyServer implements vscode.Disposable {
 
 				console.log(`[ADK][${requestId}] /run request: app=${body!.app_name}, user=${body!.user_id}, session=${body!.session_id}`);
 
-				const userText = this.extractTextFromAdkContent(body!.new_message);
-				if (!userText) {
-					this.sendAdkError(res, 400, 'No text content in new_message');
-					return;
-				}
-
 				const model = await this.resolveModel(undefined);
 				if (!model) {
 					this.sendAdkError(res, 503, 'No language model available');
@@ -338,18 +347,13 @@ class LmProxyServer implements vscode.Disposable {
 					this.sessions.set(body!.session_id, session);
 				}
 
-				// Build message array from history + new message
+				// Build message array from history + new message (with image support)
 				const vsMessages: vscode.LanguageModelChatMessage[] = [];
 				for (const historyItem of session.history) {
-					const text = this.extractTextFromAdkContent(historyItem);
-					if (historyItem.role === 'user') {
-						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
-					} else {
-						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
-					}
+					vsMessages.push(this.convertAdkContentToVsCodeMessage(historyItem));
 				}
 				// Add current user message
-				vsMessages.push(vscode.LanguageModelChatMessage.User(userText));
+				vsMessages.push(this.convertAdkContentToVsCodeMessage(body!.new_message));
 
 				console.log(`[ADK][${requestId}] Sending ${vsMessages.length} messages (${session.history.length} from history)`);
 
@@ -405,12 +409,6 @@ class LmProxyServer implements vscode.Disposable {
 
 				console.log(`[ADK][${requestId}] /run_sse request: app=${body!.app_name}, user=${body!.user_id}, session=${body!.session_id}`);
 
-				const userText = this.extractTextFromAdkContent(body!.new_message);
-				if (!userText) {
-					this.sendAdkError(res, 400, 'No text content in new_message');
-					return;
-				}
-
 				const model = await this.resolveModel(undefined);
 				if (!model) {
 					this.sendAdkError(res, 503, 'No language model available');
@@ -430,17 +428,12 @@ class LmProxyServer implements vscode.Disposable {
 					this.sessions.set(body!.session_id, session);
 				}
 
-				// Build message array from history + new message
+				// Build message array from history + new message (with image support)
 				const vsMessages: vscode.LanguageModelChatMessage[] = [];
 				for (const historyItem of session.history) {
-					const text = this.extractTextFromAdkContent(historyItem);
-					if (historyItem.role === 'user') {
-						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
-					} else {
-						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
-					}
+					vsMessages.push(this.convertAdkContentToVsCodeMessage(historyItem));
 				}
-				vsMessages.push(vscode.LanguageModelChatMessage.User(userText));
+				vsMessages.push(this.convertAdkContentToVsCodeMessage(body!.new_message));
 
 				// Set up SSE headers
 				res.setHeader('Content-Type', 'text/event-stream');
@@ -609,14 +602,24 @@ class LmProxyServer implements vscode.Disposable {
 			}
 			this.messageCounter++;
 			const messageId = `msg_${this.messageCounter.toString(16).padStart(8, '0')}`;
-			const content = typeof req.body?.content === 'string' ? req.body.content : '';
+
+			// Support both string and array content formats (with image support)
+			let contentParts: OaiContentPart[];
+			if (typeof req.body?.content === 'string') {
+				contentParts = [{ type: 'text', text: { value: req.body.content } }];
+			} else if (Array.isArray(req.body?.content)) {
+				contentParts = req.body.content;
+			} else {
+				contentParts = [{ type: 'text', text: { value: '' } }];
+			}
+
 			const message: OaiMessage = {
 				id: messageId,
 				object: 'thread.message',
 				created_at: Math.floor(Date.now() / 1000),
 				thread_id: thread.id,
 				role: req.body?.role || 'user',
-				content: [{ type: 'text', text: { value: content } }],
+				content: contentParts,
 				metadata: req.body?.metadata || {},
 			};
 			thread.messages.push(message);
@@ -669,15 +672,10 @@ class LmProxyServer implements vscode.Disposable {
 					return;
 				}
 
-				// Build messages from thread
+				// Build messages from thread (with image support)
 				const vsMessages: vscode.LanguageModelChatMessage[] = [];
 				for (const msg of thread.messages) {
-					const text = msg.content[0]?.text?.value || '';
-					if (msg.role === 'user') {
-						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
-					} else {
-						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
-					}
+					vsMessages.push(this.convertOaiContentToVsCodeMessage(msg.content, msg.role));
 				}
 
 				if (vsMessages.length === 0) {
@@ -746,17 +744,28 @@ class LmProxyServer implements vscode.Disposable {
 				messages: [],
 			};
 
-			// Add messages from request
+			// Add messages from request (with image support)
 			if (req.body?.thread?.messages) {
 				for (const msg of req.body.thread.messages) {
 					this.messageCounter++;
+
+					// Support both string and array content formats
+					let contentParts: OaiContentPart[];
+					if (typeof msg.content === 'string') {
+						contentParts = [{ type: 'text', text: { value: msg.content } }];
+					} else if (Array.isArray(msg.content)) {
+						contentParts = msg.content;
+					} else {
+						contentParts = [{ type: 'text', text: { value: '' } }];
+					}
+
 					const message: OaiMessage = {
 						id: `msg_${this.messageCounter.toString(16).padStart(8, '0')}`,
 						object: 'thread.message',
 						created_at: Math.floor(Date.now() / 1000),
 						thread_id: threadId,
 						role: msg.role || 'user',
-						content: [{ type: 'text', text: { value: msg.content || '' } }],
+						content: contentParts,
 					};
 					thread.messages.push(message);
 				}
@@ -782,12 +791,7 @@ class LmProxyServer implements vscode.Disposable {
 
 				const vsMessages: vscode.LanguageModelChatMessage[] = [];
 				for (const msg of thread.messages) {
-					const text = msg.content[0]?.text?.value || '';
-					if (msg.role === 'user') {
-						vsMessages.push(vscode.LanguageModelChatMessage.User(text));
-					} else {
-						vsMessages.push(vscode.LanguageModelChatMessage.Assistant(text));
-					}
+					vsMessages.push(this.convertOaiContentToVsCodeMessage(msg.content, msg.role));
 				}
 
 				if (vsMessages.length === 0) {
@@ -977,6 +981,146 @@ class LmProxyServer implements vscode.Disposable {
 			console.error('[LM Proxy] Failed to stringify value', error);
 			return '[unserializable]';
 		}
+	}
+
+	/**
+	 * Decode base64 string to Uint8Array
+	 */
+	private base64ToUint8Array(base64: string): Uint8Array {
+		// Remove data URI prefix if present (e.g., "data:image/png;base64,")
+		const base64Data = base64.includes(',') ? base64.split(',')[1] : base64;
+		const binaryString = Buffer.from(base64Data, 'base64');
+		return new Uint8Array(binaryString);
+	}
+
+	/**
+	 * Convert ADK content to VS Code LanguageModelChatMessage with image support
+	 */
+	private convertAdkContentToVsCodeMessage(
+		content: AdkContent,
+	): vscode.LanguageModelChatMessage {
+		if (!content.parts || !Array.isArray(content.parts) || content.parts.length === 0) {
+			// Empty content, return empty user message
+			return vscode.LanguageModelChatMessage.User('');
+		}
+
+		// Check if we have any image data parts
+		const hasImages = content.parts.some(part => part.data);
+
+		if (!hasImages) {
+			// Text-only message, use simple string content
+			const text = content.parts
+				.filter(part => part.text && typeof part.text === 'string')
+				.map(part => part.text!)
+				.join('\n');
+
+			return content.role === 'model'
+				? vscode.LanguageModelChatMessage.Assistant(text)
+				: vscode.LanguageModelChatMessage.User(text);
+		}
+
+		// Mixed content (text + images), need to use content array
+		const contentParts: Array<
+			string | vscode.LanguageModelTextPart | vscode.LanguageModelDataPart
+		> = [];
+
+		for (const part of content.parts) {
+			if (part.text && typeof part.text === 'string') {
+				contentParts.push(part.text);
+			} else if (part.data) {
+				try {
+					const imageData = this.base64ToUint8Array(part.data.data);
+					// Use LanguageModelDataPart (Proposed API)
+					const dataPart = new (vscode as any).LanguageModelDataPart(
+						part.data.mime_type,
+						imageData,
+					);
+					contentParts.push(dataPart);
+				} catch (error) {
+					console.error('[LM Proxy] Failed to decode image data:', error);
+					contentParts.push('[Image data failed to decode]');
+				}
+			}
+		}
+
+		return content.role === 'model'
+			? vscode.LanguageModelChatMessage.Assistant(contentParts)
+			: vscode.LanguageModelChatMessage.User(contentParts);
+	}
+
+	/**
+	 * Convert OpenAI content parts to VS Code LanguageModelChatMessage with image support
+	 */
+	private convertOaiContentToVsCodeMessage(
+		content: OaiContentPart[],
+		role: 'user' | 'assistant',
+	): vscode.LanguageModelChatMessage {
+		if (!content || content.length === 0) {
+			// Empty content
+			return role === 'assistant'
+				? vscode.LanguageModelChatMessage.Assistant('')
+				: vscode.LanguageModelChatMessage.User('');
+		}
+
+		// Check if we have any images
+		const hasImages = content.some(part => part.type === 'image_url' || part.type === 'image_file');
+
+		if (!hasImages) {
+			// Text-only message
+			const text = content
+				.filter((part): part is { type: 'text'; text: { value: string } } => part.type === 'text')
+				.map(part => part.text.value)
+				.join('\n');
+
+			return role === 'assistant'
+				? vscode.LanguageModelChatMessage.Assistant(text)
+				: vscode.LanguageModelChatMessage.User(text);
+		}
+
+		// Mixed content (text + images)
+		const contentParts: Array<
+			string | vscode.LanguageModelTextPart | vscode.LanguageModelDataPart
+		> = [];
+
+		for (const part of content) {
+			if (part.type === 'text') {
+				contentParts.push(part.text.value);
+			} else if (part.type === 'image_url') {
+				try {
+					const url = part.image_url.url;
+					// Check if it's a data URI
+					if (url.startsWith('data:')) {
+						// Extract mime type and base64 data
+						const match = url.match(/^data:([^;]+);base64,(.+)$/);
+						if (match) {
+							const mimeType = match[1];
+							const base64Data = match[2];
+							const imageData = this.base64ToUint8Array(base64Data);
+							const dataPart = new (vscode as any).LanguageModelDataPart(mimeType, imageData);
+							contentParts.push(dataPart);
+						} else {
+							console.warn('[LM Proxy] Invalid data URI format:', url);
+							contentParts.push('[Invalid image data URI]');
+						}
+					} else {
+						// HTTP(S) URL - we'll need to fetch it
+						console.warn('[LM Proxy] HTTP(S) image URLs are not yet supported:', url);
+						contentParts.push(`[Image URL: ${url}]`);
+					}
+				} catch (error) {
+					console.error('[LM Proxy] Failed to process image_url:', error);
+					contentParts.push('[Image processing failed]');
+				}
+			} else if (part.type === 'image_file') {
+				// File IDs are not supported in this proxy
+				console.warn('[LM Proxy] image_file type is not supported:', part.image_file.file_id);
+				contentParts.push(`[Image file ID: ${part.image_file.file_id}]`);
+			}
+		}
+
+		return role === 'assistant'
+			? vscode.LanguageModelChatMessage.Assistant(contentParts)
+			: vscode.LanguageModelChatMessage.User(contentParts);
 	}
 
 	// No token-counting helper needed; the proxy forwards payloads directly.

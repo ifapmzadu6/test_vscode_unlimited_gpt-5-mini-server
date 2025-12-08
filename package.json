@@ -15,6 +15,9 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "enabledApiProposals": [
+    "languageModelDataPart"
+  ],
   "contributes": {
     "configuration": {
       "title": "LM Proxy Server",
