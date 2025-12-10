@@ -48,7 +48,7 @@ OpenAI Responses API 互換のボディを受け取り、VS Code LM API に転�
 }
 ```
 
-または `input` に文字列またはメッセージ配列を渡すこともできます。`content` は `type: text` のみサポートしています。
+または `input` に文字列またはメッセージ配列を渡すこともできます。`content` は `type: text` をサポートしています。VS Code Insiders版では画像入力（`type: image_url`）もサポートします（詳細は「マルチモーダル（画像）対応」セクションを参照）。
 
 応答は OpenAI Responses API のレスポンス形式を模した JSON を返します。
 
@@ -182,9 +182,64 @@ ADK クライアントで `base_url` をこのサーバーに向けて設定し�
 # ADK の設定でエンドポイントを指定
 ```
 
+## マルチモーダル（画像）対応
+
+**VS Code Insiders版で画像入力をサポートします**（Proposed API: `languageModelDataPart`）
+
+📚 **詳しい使用例は [examples/](./examples/) ディレクトリを参照してください**
+
+### Google ADK API
+
+画像を送信するには、`parts`に`data`フィールドを含めます：
+
+```jsonc
+{
+  "app_name": "vscode-lm-proxy",
+  "user_id": "user-123",
+  "session_id": "session-456",
+  "new_message": {
+    "parts": [
+      {"text": "この画像には何が写っていますか？"},
+      {
+        "data": {
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA...", // base64エンコードされた画像データ
+          "mime_type": "image/png"
+        }
+      }
+    ],
+    "role": "user"
+  }
+}
+```
+
+### OpenAI Assistants API
+
+画像を送信するには、`content`配列に`image_url`タイプを含めます：
+
+```jsonc
+{
+  "role": "user",
+  "content": [
+    {"type": "text", "text": {"value": "この画像には何が写っていますか？"}},
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA..."
+      }
+    }
+  ]
+}
+```
+
+**注意：**
+- 現在、data URI形式（`data:image/...;base64,...`）のみサポートしています
+- HTTP(S) URLからの画像取得は未対応です
+- `image_file`タイプ（ファイルID）は未対応です
+
 ## 注意事項
 
-- VS Code の LM API 制約により、ツール呼び出しや画像などの高度なコンテンツは未対応です。
+- **画像対応**：VS Code Insiders版のProposed APIを使用して画像入力をサポートしています。安定版VS Codeでは画像機能は利用できません。
+- **ツール呼び出し**：現在未対応です。
 - モデルが提供するトークン数などの詳細メトリクスは取得できないため `usage` フィールドはゼロを返します。
 - モデル呼び出しはユーザー承認が必要です。初回リクエストで拒否された場合、クライアント側には 500 エラーが返ります。VS Code でアクセス許可を確認してください。
 - ADK API: セッション状態はメモリ内のみ保存され、サーバー再起動で消失します。
